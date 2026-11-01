@@ -1,6 +1,7 @@
 import streamlit as st
 import numpy as np
 import joblib
+import gzip
 import pandas as pd
 
 st.set_page_config(
@@ -17,7 +18,8 @@ st.write(
 
 @st.cache_resource
 def load_models():
-    rf = joblib.load("borrower_risk_model/random_forest.pkl")
+    with gzip.open("borrower_risk_model/random_forest.pkl.gz", "rb") as f:
+        rf = joblib.load(f)
     xgb = joblib.load("borrower_risk_model/xgboost.pkl")
     gb = joblib.load("borrower_risk_model/gradient_boosting.pkl")
     preprocessor = joblib.load("borrower_risk_model/preprocessor.pkl")
@@ -160,32 +162,7 @@ if submitted:
                 )
                 shap_array = np.array(values).reshape(-1)
 
-                friendly_names = {
-    "num__installment": "Monthly Loan Installment",
-    "num__log.annual.inc": "Annual Income",
-    "num__inq.last.6mths": "Recent Credit Inquiries",
-    "num__credit.policy": "Credit Policy Eligibility",
-    "num__int.rate": "Loan Interest Rate",
-    "num__revol.util": "Credit Utilization",
-    "num__days.with.cr.line": "Length of Credit History",
-    "num__fico": "Credit Score",
-    "num__revol.bal": "Revolving Credit Balance",
-    "num__dti": "Debt-to-Income Ratio",
-    "num__delinq.2yrs": "Past Delinquencies",
-    "num__pub.rec": "Public Records",
-    "cat__purpose_all_other": "Purpose: Other",
-    "cat__purpose_credit_card": "Purpose: Credit Card",
-    "cat__purpose_debt_consolidation": "Purpose: Debt Consolidation",
-    "cat__purpose_educational": "Purpose: Education",
-    "cat__purpose_home_improvement": "Purpose: Home Improvement",
-    "cat__purpose_major_purchase": "Purpose: Major Purchase",
-    "cat__purpose_small_business": "Purpose: Small Business"
-}
-
-feature_names = [
-    friendly_names.get(name, name)
-    for name in preprocessor.get_feature_names_out()
-]
+                feature_names = preprocessor.get_feature_names_out()
                 importance = pd.DataFrame({
                     "Feature": feature_names,
                     "SHAP Value": shap_array
