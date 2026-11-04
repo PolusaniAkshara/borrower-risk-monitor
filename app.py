@@ -1063,40 +1063,43 @@ if page == "Individual Risk Assessment":
 # TAB 2: BORROWER RISK MONITORING
 # ============================================================
 
+# ============================================================
+# PAGE 2: BORROWER RISK MONITORING
+# ============================================================
+
 if page == "Borrower Risk Monitoring":
-    st.subheader("Monitor Borrower Risk Over Time")
 
+    st.subheader("Borrower Risk Monitoring")
     st.write(
-        "Upload monthly records for multiple borrowers or generate "
-        "simulated demo data to explore the monitoring workflow."
+        "Monitor changes in borrower risk, identify borrowers "
+        "requiring attention, and understand the factors influencing "
+        "their estimated risk."
     )
 
-    st.warning(
-        "Generated records are simulated examples, not actual bank "
-        "records. Model scores and alerts depend on the saved model's "
-        "predictions."
-    )
-
-    st.markdown("#### 1. Prepare the CSV")
+    st.markdown("### 1. Upload or Generate Monitoring Data")
 
     template = create_csv_template()
 
-    st.download_button(
-        "Download CSV Template",
-        data=template.to_csv(index=False).encode("utf-8"),
-        file_name="borrower_monitoring_template.csv",
-        mime="text/csv",
-    )
+    c1, c2 = st.columns([1, 2])
 
-    st.caption(
-        "Use one row per borrower per month. Fill every required "
-        "financial field. Do not leave model input cells blank."
-    )
+    with c1:
+        st.download_button(
+            "Download CSV Template",
+            data=template.to_csv(index=False).encode("utf-8"),
+            file_name="borrower_monitoring_template.csv",
+            mime="text/csv",
+            use_container_width=True,
+        )
 
-    st.markdown("#### 2. Choose a data source")
+    with c2:
+        st.caption(
+            "Upload one record per borrower per month. "
+            "The CSV should contain borrower ID, month, annual income "
+            "and the required financial details."
+        )
 
     source_choice = st.radio(
-        "Data source",
+        "Choose data source",
         [
             "Generate Sample Monitoring Data",
             "Upload Borrower CSV",
@@ -1107,8 +1110,9 @@ if page == "Borrower Risk Monitoring":
     monitoring_df = None
 
     if source_choice == "Generate Sample Monitoring Data":
+
         if st.button(
-            "Generate Sample Monitoring Data",
+            "Generate Sample Data",
             type="primary",
         ):
             try:
@@ -1125,34 +1129,42 @@ if page == "Borrower Risk Monitoring":
         ):
             monitoring_df = st.session_state["monitoring_data"]
 
+        if monitoring_df is not None:
+            st.info(
+                "These are simulated borrower records for demonstration. "
+                "They do not represent actual bank customers."
+            )
+
     else:
+
         uploaded_file = st.file_uploader(
             "Upload monthly borrower CSV",
             type=["csv"],
-            help=(
-                "The file must contain borrower ID, month, and all "
-                "required model input fields."
-            ),
+            help="Upload the completed borrower monitoring CSV template.",
         )
 
         if uploaded_file is not None:
             try:
                 uploaded_df = pd.read_csv(uploaded_file)
+
                 monitoring_df = monitoring_csv_to_model_input(
                     uploaded_df
                 )
+
                 st.session_state["monitoring_data"] = monitoring_df
                 st.session_state["monitoring_source"] = "uploaded"
+
+                st.success("CSV uploaded and validated successfully.")
+
             except Exception as e:
                 st.error(f"Could not use this CSV: {e}")
                 monitoring_df = None
 
     if monitoring_df is not None:
+
         try:
             monitoring_df = monitoring_df.copy()
 
-            # For simulated data, the frame already has model features.
-            # Uploaded data has been converted by the CSV validation step.
             required_monitoring = (
                 ["borrower_id", "month"] + MODEL_FEATURES
             )
@@ -1169,13 +1181,32 @@ if page == "Borrower Risk Monitoring":
                 )
                 st.stop()
 
-            if monitoring_df[MODEL_FEATURES].isnull().any().any():
+            # Optional numeric fields may contain missing values.
+            # The saved preprocessing pipeline handles these using
+            # training-time imputation.
+            required_input_fields = [
+                "credit.policy",
+                "purpose",
+                "int.rate",
+                "installment",
+                "log.annual.inc",
+                "dti",
+                "fico",
+                "delinq.2yrs",
+            ]
+
+            if monitoring_df[required_input_fields].isnull().any().any():
                 st.error(
-                    "Monitoring data contains missing model inputs. "
-                    "No predictions were generated."
+                    "Some required borrower information is missing. "
+                    "Please check the uploaded records."
                 )
                 st.stop()
 
+            monitoring_df = monitoring_df.sort_values(
+                ["borrower_id", "month"]
+            ).reset_index(drop=True)
+
+            # Prepare model inputs and generate ensemble predictions.
             processed = prepare_model_data(
                 monitoring_df[MODEL_FEATURES]
             )
@@ -1185,73 +1216,192 @@ if page == "Borrower Risk Monitoring":
             )
 
             monitoring_df["risk_classification"] = (
-                monitoring_df["risk_probability"]
-                .apply(risk_category)
+                monitoring_df["risk_probability"].apply(risk_category)
             )
 
-            monitoring_df = monitoring_df.sort_values(
-                ["borrower_id", "month"]
-            ).reset_index(drop=True)
-
+            # Calculate change compared with the previous recorded month.
             monitoring_df["risk_change"] = (
                 monitoring_df.groupby("borrower_id")[
                     "risk_probability"
                 ].diff()
             )
 
-            # Prototype alert rule: an increase of at least 10 percentage
-            # points compared with the preceding recorded month.
+            # Early-warning conditions:
+            # 1. Risk increased by at least 10 percentage points.
+            # 2. Current risk score reached the classification threshold.
             monitoring_df["early_warning"] = (
-    (monitoring_df["risk_change"] >= 0.10) |
-    (monitoring_df["risk_probability"] >= 0.31)
-)
-            st.write(
-    monitoring_df[
-        ["borrower_id", "month", "risk_probability", "risk_change", "early_warning"]
-    ]
-)
+                (monitoring_df["risk_change"] >= 0.10)
+                |
+                (
+                    monitoring_df["risk_probability"]
+                    >= DECISION_THRESHOLD
+                )
+            )
+
+            # Explain why each alert was generated.
+            monitoring_df["alert_reason"] = np.select(
+                [
+                    (
+                        (monitoring_df["risk_change"] >= 0.10)
+                        &
+                        (
+                            monitoring_df["risk_probability"]
+                            >= DECISION_THRESHOLD
+                        )
+                    ),
+                    monitoring_df["risk_change"] >= 0.10,
+                    (
+                        monitoring_df["risk_probability"]
+                        >= DECISION_THRESHOLD
+                    ),
+                ],
+                [
+                    "Risk increased and crossed the threshold",
+                    "Risk increased by at least 10 percentage points",
+                    "Current risk score is above the threshold",
+                ],
+                default="No alert",
+            )
+
+            # Get the most recent record for each borrower.
+            latest_records = (
+                monitoring_df.groupby("borrower_id", sort=False)
+                .tail(1)
+                .copy()
+            )
+
+            # Describe each borrower's recent trend.
+            def get_risk_trend(change):
+                if pd.isna(change):
+                    return "Not enough history"
+                elif change >= 0.02:
+                    return "Increasing"
+                elif change <= -0.02:
+                    return "Decreasing"
+                return "Stable"
+
+            latest_records["risk_trend"] = (
+                latest_records["risk_change"].apply(get_risk_trend)
+            )
+
+            latest_records["status"] = np.where(
+                latest_records["early_warning"],
+                "Needs Attention",
+                "Lower Risk",
+            )
+
+            # ====================================================
+            # 2. OVERALL MONITORING SUMMARY
+            # ====================================================
+
             st.divider()
-            st.subheader("Monitoring Summary")
+            st.subheader("2. Overall Monitoring Summary")
+
+            total_borrowers = len(latest_records)
+
+            attention_count = int(
+                latest_records["early_warning"].sum()
+            )
+
+            increasing_count = int(
+                (
+                    latest_records["risk_trend"] == "Increasing"
+                ).sum()
+            )
+
+            decreasing_count = int(
+                (
+                    latest_records["risk_trend"] == "Decreasing"
+                ).sum()
+            )
 
             m1, m2, m3, m4 = st.columns(4)
 
             m1.metric(
-                "Borrowers",
-                int(monitoring_df["borrower_id"].nunique()),
+                "Total Borrowers",
+                total_borrowers,
             )
+
             m2.metric(
-                "Monthly Records",
-                int(len(monitoring_df)),
+                "Need Attention",
+                attention_count,
             )
+
             m3.metric(
-                "Higher-Risk Records",
-                int(
-                    (
-                        monitoring_df["risk_probability"]
-                        >= DECISION_THRESHOLD
-                    ).sum()
-                ),
+                "Risk Increasing",
+                increasing_count,
             )
+
             m4.metric(
-                "Risk Increase Alerts",
-                int(monitoring_df["early_warning"].sum()),
+                "Risk Decreasing",
+                decreasing_count,
             )
 
             st.caption(
-                "The alert is a prototype rule, not a validated "
-                "banking policy. A risk increase should prompt review, "
-                "not automatic rejection."
+                "The summary uses the latest available record for "
+                "each borrower. Risk classifications are based on "
+                "the saved model threshold."
             )
 
-            st.subheader("Borrower Risk Trend")
+            # ====================================================
+            # 3. BORROWER RISK OVERVIEW
+            # ====================================================
+
+            st.divider()
+            st.subheader("3. Borrower Risk Overview")
+
+            st.write(
+                "This table shows the latest estimated risk and "
+                "recent trend for each borrower."
+            )
+
+            overview_df = latest_records[
+                [
+                    "borrower_id",
+                    "risk_probability",
+                    "risk_trend",
+                    "risk_classification",
+                    "status",
+                ]
+            ].copy()
+
+            overview_df["risk_probability"] = (
+                overview_df["risk_probability"].map(
+                    lambda value: f"{value:.1%}"
+                )
+            )
+
+            overview_df = overview_df.rename(
+                columns={
+                    "borrower_id": "Borrower ID",
+                    "risk_probability": "Estimated Risk",
+                    "risk_trend": "Risk Trend",
+                    "risk_classification": "Risk Classification",
+                    "status": "Monitoring Status",
+                }
+            )
+
+            st.dataframe(
+                overview_df,
+                use_container_width=True,
+                hide_index=True,
+            )
+
+            # ====================================================
+            # 4. BORROWER RISK TREND GRAPH
+            # ====================================================
+
+            st.divider()
+            st.subheader("4. Borrower Risk Trend")
 
             borrower_ids = sorted(
                 monitoring_df["borrower_id"].astype(str).unique()
             )
 
             selected_borrower = st.selectbox(
-                "Select Borrower",
+                "Select a borrower to view their monthly risk trend",
                 borrower_ids,
+                key="monitoring_borrower_select",
             )
 
             borrower_history = monitoring_df[
@@ -1259,162 +1409,317 @@ if page == "Borrower Risk Monitoring":
                 == selected_borrower
             ].sort_values("month")
 
-            chart_data = borrower_history[
-                ["month", "risk_probability"]
-            ].copy()
+            fig, ax = plt.subplots(figsize=(10, 4.5))
 
-            chart_data["month"] = pd.to_datetime(
-                chart_data["month"]
-            )
-            chart_data = chart_data.set_index("month")
-            chart_data = chart_data.rename(
-                columns={"risk_probability": "Estimated Risk Score"}
+            chart_dates = pd.to_datetime(
+                borrower_history["month"]
             )
 
-            st.line_chart(
-                chart_data,
-                y="Estimated Risk Score",
+            chart_scores = (
+                borrower_history["risk_probability"] * 100
             )
+
+            ax.plot(
+                chart_dates,
+                chart_scores,
+                marker="o",
+                linewidth=2.5,
+                markersize=7,
+                label="Estimated Risk",
+            )
+
+            ax.axhline(
+                y=DECISION_THRESHOLD * 100,
+                linestyle="--",
+                linewidth=1.8,
+                label=f"Risk Threshold ({DECISION_THRESHOLD:.0%})",
+            )
+
+            ax.set_xlabel("Monitoring Month")
+            ax.set_ylabel("Estimated Risk Score (%)")
+            ax.set_title(
+                f"Monthly Risk Trend - {selected_borrower}"
+            )
+
+            ax.set_ylim(0, 100)
+            ax.grid(True, alpha=0.25)
+            ax.legend()
+            fig.autofmt_xdate()
+            fig.tight_layout()
+
+            st.pyplot(fig)
+            plt.close(fig)
 
             st.caption(
-                "The horizontal axis shows recorded months. "
-                "The vertical axis shows the model-estimated score, "
-                "not a confirmed probability of default by that month."
+                "An upward line indicates increasing estimated risk. "
+                "A downward line indicates decreasing estimated risk. "
+                "The dashed line represents the model's risk threshold."
             )
 
-            st.subheader("Borrower Monitoring Records")
+            latest_borrower = borrower_history.iloc[-1]
 
-            display_df = monitoring_df.copy()
-            display_df["month"] = pd.to_datetime(
-                display_df["month"]
-            ).dt.strftime("%Y-%m-%d")
-            display_df["risk_probability"] = (
-                display_df["risk_probability"].map(
-                    lambda value: f"{value:.1%}"
+            trend_col1, trend_col2, trend_col3 = st.columns(3)
+
+            trend_col1.metric(
+                "Latest Estimated Risk",
+                f"{latest_borrower['risk_probability']:.1%}",
+            )
+
+            trend_col2.metric(
+                "Risk Classification",
+                latest_borrower["risk_classification"],
+            )
+
+            change_value = latest_borrower["risk_change"]
+
+            trend_col3.metric(
+                "Change Since Previous Month",
+                (
+                    "First record"
+                    if pd.isna(change_value)
+                    else f"{change_value:+.1%}"
+                ),
+            )
+
+            # ====================================================
+            # 5. WHY IS THIS BORROWER AT RISK?
+            # ====================================================
+
+            st.divider()
+            st.subheader("5. Understand the Risk Factors")
+
+            st.write(
+                "Generate an explanation for the selected borrower's "
+                "latest risk assessment using SHAP."
+            )
+
+            selected_index = borrower_history.index[-1]
+
+            if st.button(
+                "Explain Selected Borrower's Risk",
+                type="primary",
+                key="monitoring_shap_button",
+            ):
+                st.markdown(
+                    f"### Risk Explanation: {selected_borrower}"
                 )
-            )
-            display_df["risk_change"] = display_df[
-                "risk_change"
-            ].map(
-                lambda value: (
-                    "—" if pd.isna(value) else f"{value:+.1%}"
+
+                st.metric(
+                    "Latest Estimated Risk",
+                    f"{latest_borrower['risk_probability']:.1%}",
                 )
-            )
 
-            display_df["early_warning"] = display_df["early_warning"].map(
-    {
-        True: "⚠️ Alert",
-        False: "No Alert",
-    }
-)
-            display_df = display_df.rename(columns={
-                "borrower_id": "Borrower ID",
-                "month": "Month",
-                "risk_probability": "Estimated Risk Score",
-                "risk_classification": "Risk Classification",
-                "risk_change": "Change Since Previous Month",
-                "early_warning": "Early Warning Alert",
-            })
-
-            st.dataframe(
-                display_df[
-                    [
-                        "Borrower ID",
-                        "Month",
-                        "Estimated Risk Score",
-                        "Risk Classification",
-                        "Change Since Previous Month",
-                        "Early Warning Alert",
-                    ]
-                ],
-                use_container_width=True,
-                hide_index=True,
-            )
-
-            alert_rows = monitoring_df[
-                monitoring_df["early_warning"]
-            ]
-
-            st.subheader("Early Warning Alerts")
-
-            if alert_rows.empty:
-                st.info(
-                    "No risk increase met the prototype alert rule "
-                    "in these records. This does not mean every borrower "
-                    "is financially safe."
-                )
-            else:
                 st.write(
-                    "The following records show an increase of at least "
-                    "10 percentage points since the previous recorded month:"
+                    "The following factors show how the borrower's "
+                    "financial information influenced the model's "
+                    "latest risk estimate."
                 )
 
-                alerts_to_show = alert_rows[
-                    [
-                        "borrower_id",
-                        "month",
-                        "risk_probability",
-                        "risk_change",
-                    ]
-                ].copy()
-
-                alerts_to_show["month"] = (
-                    alerts_to_show["month"].dt.strftime("%Y-%m-%d")
+                explain_prediction(
+                    processed[selected_index]
                 )
-                alerts_to_show["risk_probability"] = (
-                    alerts_to_show["risk_probability"].map(
+
+            # ====================================================
+            # 6. EARLY WARNING ALERTS
+            # ====================================================
+
+            st.divider()
+            st.subheader("6. Early Warning Alerts")
+
+            st.write(
+                "These alerts identify borrowers who need further "
+                "review based on their latest available records."
+            )
+
+            latest_alerts = latest_records[
+                latest_records["early_warning"]
+            ].sort_values(
+                "risk_probability",
+                ascending=False,
+            )
+
+            if latest_alerts.empty:
+
+                st.success(
+                    "No borrowers currently meet the early-warning "
+                    "conditions in their latest records."
+                )
+
+            else:
+
+                for _, alert in latest_alerts.iterrows():
+
+                    with st.container(border=True):
+
+                        alert_col1, alert_col2 = st.columns(
+                            [3, 1]
+                        )
+
+                        with alert_col1:
+                            st.markdown(
+                                f"**Borrower ID: {alert['borrower_id']}**"
+                            )
+
+                            st.write(
+                                f"Month: {pd.to_datetime(alert['month']).strftime('%b %Y')}"
+                            )
+
+                            st.write(
+                                f"Reason: {alert['alert_reason']}"
+                            )
+
+                        with alert_col2:
+                            st.metric(
+                                "Estimated Risk",
+                                f"{alert['risk_probability']:.1%}",
+                            )
+
+                        if pd.notna(alert["risk_change"]):
+                            st.caption(
+                                "Change since previous month: "
+                                f"{alert['risk_change']:+.1%}"
+                            )
+
+                        st.caption(
+                            "Review the borrower's financial information. "
+                            "An alert is not an automatic lending decision."
+                        )
+
+            # ====================================================
+            # 7. DETAILED MONTHLY RECORDS
+            # ====================================================
+
+            st.divider()
+
+            with st.expander(
+                "View Detailed Monthly Monitoring Records",
+                expanded=False,
+            ):
+
+                display_df = monitoring_df.copy()
+
+                display_df["month"] = pd.to_datetime(
+                    display_df["month"]
+                ).dt.strftime("%Y-%m-%d")
+
+                display_df["risk_probability"] = (
+                    display_df["risk_probability"].map(
                         lambda value: f"{value:.1%}"
                     )
                 )
-                alerts_to_show["risk_change"] = (
-                    alerts_to_show["risk_change"].map(
-                        lambda value: f"{value:+.1%}"
+
+                display_df["risk_change"] = (
+                    display_df["risk_change"].map(
+                        lambda value: (
+                            "—"
+                            if pd.isna(value)
+                            else f"{value:+.1%}"
+                        )
                     )
                 )
 
-                alerts_to_show = alerts_to_show.rename(columns={
-                    "borrower_id": "Borrower ID",
-                    "month": "Month",
-                    "risk_probability": "Estimated Risk Score",
-                    "risk_change": "Change Since Previous Month",
-                })
+                display_df["early_warning"] = (
+                    display_df["early_warning"].map(
+                        {
+                            True: "Alert",
+                            False: "No Alert",
+                        }
+                    )
+                )
+
+                display_df = display_df.rename(
+                    columns={
+                        "borrower_id": "Borrower ID",
+                        "month": "Month",
+                        "risk_probability": "Estimated Risk",
+                        "risk_classification": "Risk Classification",
+                        "risk_change": "Change Since Previous Month",
+                        "early_warning": "Early Warning",
+                    }
+                )
 
                 st.dataframe(
-                    alerts_to_show,
+                    display_df[
+                        [
+                            "Borrower ID",
+                            "Month",
+                            "Estimated Risk",
+                            "Risk Classification",
+                            "Change Since Previous Month",
+                            "Early Warning",
+                            "alert_reason",
+                        ]
+                    ].rename(
+                        columns={
+                            "alert_reason": "Alert Reason"
+                        }
+                    ),
                     use_container_width=True,
                     hide_index=True,
                 )
 
-            st.subheader("Download Analysis")
+            # ====================================================
+            # 8. DOWNLOAD ANALYSIS
+            # ====================================================
+
+            st.divider()
+            st.subheader("7. Download Monitoring Analysis")
+
+            st.write(
+                "Download the borrower risk scores, monthly changes, "
+                "classifications and early-warning information."
+            )
 
             download_df = monitoring_df.copy()
+
             download_df["month"] = pd.to_datetime(
                 download_df["month"]
             ).dt.strftime("%Y-%m-%d")
 
-            download_df = download_df.rename(columns={
-                "borrower_id": "Borrower ID",
-                "month": "Month",
-                "risk_probability": "Estimated Risk Score",
-                "risk_classification": "Risk Classification",
-                "risk_change": "Change Since Previous Month",
-                "early_warning": "Early Warning Alert",
-            })
+            download_df["risk_probability"] = (
+                download_df["risk_probability"] * 100
+            )
+
+            download_df["risk_change"] = (
+                download_df["risk_change"] * 100
+            )
+
+            download_df = download_df.rename(
+                columns={
+                    "borrower_id": "Borrower ID",
+                    "month": "Month",
+                    "risk_probability": "Estimated Risk Score (%)",
+                    "risk_classification": "Risk Classification",
+                    "risk_change": "Change Since Previous Month (%)",
+                    "early_warning": "Early Warning",
+                    "alert_reason": "Alert Reason",
+                }
+            )
 
             st.download_button(
                 "Download Risk Analysis CSV",
-                data=download_df.to_csv(index=False).encode("utf-8"),
+                data=download_df.to_csv(
+                    index=False
+                ).encode("utf-8"),
                 file_name="borrower_risk_analysis.csv",
                 mime="text/csv",
+                type="primary",
+            )
+
+            st.caption(
+                "Risk scores are model estimates based on historical "
+                "training patterns. Alerts indicate records requiring "
+                "review, not confirmed future defaults."
             )
 
         except Exception as e:
-            st.error(
-                "Monitoring could not be completed. Check the input "
-                "data and model compatibility."
-            )
-            st.exception(e)
 
+            st.error(
+                "Monitoring could not be completed. "
+                "Check the uploaded data and model compatibility."
+            )
+
+            st.exception(e)
 
 # ============================================================
 # FOOTER
